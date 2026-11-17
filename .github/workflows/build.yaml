@@ -1,0 +1,54 @@
+---
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set image name
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+        run: echo "IMAGE=${REGISTRY:-${GITHUB_SERVER_URL#*://}}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          RFFMPEG_REPO: ${{ vars.RFFMPEG_REPO }}
+        run: |
+          docker build --pull ${RFFMPEG_REPO:+--build-arg RFFMPEG_REPO=$RFFMPEG_REPO} -t "$IMAGE:latest" .
+
+      - name: Tag with the Jellyfin version
+        run: |
+          version=$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$IMAGE:latest")
+          test -n "$version"
+          docker tag "$IMAGE:latest" "$IMAGE:${version#v}"
+          echo "Tagged $IMAGE:${version#v}"
+
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint sh "$IMAGE:latest" -c \
+            'ssh -V && python3 -c "import click, yaml" && test "$(readlink /usr/local/bin/ffmpeg)" = rffmpeg'
+          docker run --rm --user 12345:12345 --entrypoint /usr/local/bin/entrypoint "$IMAGE:latest" \
+            ssh -G localhost >/dev/null
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        env:
+          REGISTRY_USER: ${{ vars.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          echo "${REGISTRY_TOKEN:-${{ secrets.GITHUB_TOKEN }}}" | docker login "${IMAGE%%/*}" -u "${REGISTRY_USER:-${{ github.actor }}}" --password-stdin
+          docker push --all-tags "$IMAGE"
+          docker logout "${IMAGE%%/*}"

@@ -1,22 +1,78 @@
-[![Docker Pull Count](https://img.shields.io/docker/pulls/bitwrk/jellyfin-rffmpeg)](https://hub.docker.com/r/bitwrk/jellyfin-rffmpeg)
+# Jellyfin with rffmpeg
 
-[![License](https://img.shields.io/github/license/Shadowghost/jellyfin-rffmpeg)](https://github.com/Shadowghost/jellyfin-rffmpeg/blob/master/LICENSE)
-[![Issues](https://img.shields.io/github/issues/Shadowghost/jellyfin-rffmpeg)](https://github.com/Shadowghost/jellyfin-rffmpeg/issues)
-[![Master Commit RSS Feed](https://img.shields.io/badge/rss-commits-ffa500?logo=rss)](https://github.com/Shadowghost/jellyfin-rffmpeg/commits/master.atom)
+The official [Jellyfin](https://jellyfin.org) image with
+[rffmpeg](https://github.com/joshuaboniface/rffmpeg) added, so transcodes can run on another host
+over SSH. Based on [Shadowghost/jellyfin-rffmpeg](https://github.com/Shadowghost/jellyfin-rffmpeg).
 
-## Jellyfin with rFFmpeg
-This images extend the official [Jellyfin](https://jellyfin.org) [docker images](https://hub.docker.com/r/jellyfin/jellyfin) with [rFFmpeg](https://github.com/joshuaboniface/rffmpeg) support.
+## What the image adds
 
-The rFFmpeg binary is located at `/usr/local/bin/rffmpeg` and accessible to Jellyfin as `/usr/local/bin/ffmpeg`.
+- `rffmpeg` at `/usr/local/bin/rffmpeg`, with `ffmpeg` and `ffprobe` symlinked to it in
+  `/usr/local/bin`.
+- `openssh-client`, `python3-click` and `python3-yaml`.
+- An entrypoint that lets the container run as any UID. `ssh` refuses to start for a UID with no
+  passwd entry, so when the running UID isn't in `/etc/passwd`, the entrypoint writes a `jellyfin`
+  entry for it (home `$JELLYFIN_DATA_DIR`) to `/tmp` and loads it with
+  [`libnss_wrapper`](https://cwrap.org/nss_wrapper.html). `/tmp` has to be writable; the rest of
+  the root filesystem can be read-only.
 
-The stock configuration should work for most users, but you can overwrite the default configuration by mounting an alternative one to `/etc/rffmpeg/rffmpeg.yml`.
+Jellyfin itself starts as before, and keeps using its own ffmpeg until you point it at rffmpeg.
 
-To execute `rffmpeg` commands against the container, for instance to add hosts or view status, use:
+## Using it
 
+1. Set `JELLYFIN_FFMPEG=/usr/local/bin/ffmpeg`.
+2. Mount a config at `/etc/rffmpeg/rffmpeg.yml`, or set `RFFMPEG_CONFIG` to another path. Without
+   one, rffmpeg uses its defaults. See
+   [`rffmpeg.yml.sample`](https://github.com/joshuaboniface/rffmpeg/blob/master/rffmpeg.yml.sample).
+3. Make these writable and persistent where needed:
+   - the state directory, `/var/lib/rffmpeg` by default, which holds the host database;
+   - the SSH persistence directory, `/run/shm` by default.
+4. Mount the SSH private key and pass it in the config's `remote.args`.
+5. Set `TMPDIR` to a directory the transcode hosts also mount. Jellyfin 10.10 and later need this.
+6. Mount the media and the transcode directory at the same paths on the transcode hosts as in the
+   container. rffmpeg passes paths through unchanged.
+7. Run `rffmpeg init` (add `--no-root` when the container doesn't run as root), then
+   `rffmpeg add <host>`:
+
+   ```sh
+   docker exec -it jellyfin rffmpeg init
+   docker exec -it jellyfin rffmpeg add <host>
+   docker exec -it jellyfin rffmpeg status
+   ```
+
+The transcode hosts need `jellyfin-ffmpeg` and an SSH user with the container's UID and GID.
+
+If no host is reachable, rffmpeg runs ffmpeg locally. That fallback uses the same arguments, so it
+only works if the container can do whatever hardware acceleration Jellyfin is set to use.
+
+## Building
+
+```sh
+docker build -t jellyfin-rffmpeg .
 ```
-docker exec -it jellyfin rffmpeg <command>
-```
 
-Be sure to run `rffmpeg init` and `rffmpeg add` first before using it.
+| Build arg | Default |
+| --- | --- |
+| `RFFMPEG_REPO` | `https://github.com/joshuaboniface/rffmpeg.git` |
+| `RFFMPEG_COMMIT` | the commit pinned in the `Dockerfile` |
 
-For more information on rFFmpeg and configuration instructions take a look at the [project's repository](https://github.com/joshuaboniface/rffmpeg)!
+`RFFMPEG_REPO` has to be a git URL ending in `.git`. BuildKit only clones URLs that look like git
+repositories; any other `https://` URL is downloaded as a plain file, which ignores
+`RFFMPEG_COMMIT` and, for a repository's web page, saves the HTML as `rffmpeg`.
+
+### GitHub Actions
+
+`.github/workflows/build.yaml` builds and smoke-tests every pull request. On `master` it pushes the
+image to the current server's container registry, tagged with the Jellyfin version from the base
+image's `org.opencontainers.image.version` label and `latest`.
+
+| Setting | Kind | Purpose |
+| --- | --- | --- |
+| `REGISTRY` | variable | Registry host, if it differs from the instance's server URL |
+| `REGISTRY_USER` | variable | Registry login |
+| `REGISTRY_TOKEN` | secret | Token for `REGISTRY_USER` with package write access |
+| `RFFMPEG_REPO` | variable | rffmpeg repository to build from, e.g. a mirror; must end in `.git` |
+
+### Updates
+
+Renovate updates the pinned Jellyfin base image, and follows rffmpeg's `master` branch to update
+`RFFMPEG_COMMIT`. rffmpeg has no releases.
